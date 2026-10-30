@@ -4,7 +4,7 @@
 
 A tiny digital escape for a full head. One tap takes you somewhere calm, satisfying or a bit silly. Put thoughts down in a box. Close the day.
 
-- **OFF**: a random micro-escape (16 of them: night sky, zen sand, bubble wrap, a potato, a duck, a sleepy dragon, fireflies, a campfire and more)
+- **OFF**: a random micro-escape (21 of them: night sky, zen sand, bubble wrap, a potato, a duck, a sleepy dragon, fireflies, a campfire and more, plus five gentle games: a block tower, a plinko of small pleasures, connect-the-stars, noughts and crosses against a very slow sloth, and memory pairs)
 - **Put it down**: drop what's on your mind into **My Box**. No dates, priorities or scores.
 - **I'm done**: a closing ritual for the end of the day.
 
@@ -22,6 +22,14 @@ This is a static site: a single `index.html` with no build step.
 4. Click **Deploy**.
 
 Every push to the default branch redeploys automatically.
+
+## Offline
+
+After the first visit the whole app works with no connection: the page, React, the fonts, every escape and every game are saved by a service worker (`sw.js`). It can also be installed to a phone's home screen (`manifest.webmanifest`).
+
+- The page is fetched fresh whenever you are online, and the saved copy is used when you are not.
+- Supabase requests are never cached. Changes made to My Box offline are queued and sent when the connection returns.
+- To ship a change that must reach everyone at once, bump `CACHE` in `sw.js`.
 
 ## Supabase (My Box storage)
 
