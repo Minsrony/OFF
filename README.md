@@ -4,7 +4,7 @@
 
 A tiny digital escape for a full head. One tap takes you somewhere calm, satisfying or a bit silly. Put thoughts down in a box. Close the day.
 
-- **OFF**: a random micro-escape (21 of them: night sky, zen sand, bubble wrap, a potato, a duck, a sleepy dragon, fireflies, a campfire and more, plus five gentle games: a block tower, a plinko of small pleasures, connect-the-stars, noughts and crosses against a very slow sloth, and memory pairs)
+- **OFF**: a random micro-escape (24 of them: night sky, zen sand, bubble wrap, a potato, a duck, a sleepy dragon, fireflies, a campfire and more, plus eight gentle games: a block tower, a plinko of small pleasures, connect-the-stars, noughts and crosses against a very slow sloth, memory pairs, dot to dot, an arrow maze and gentle falling blocks)
 - **Put it down**: drop what's on your mind into **My Box**. No dates, priorities or scores.
 - **I'm done**: a closing ritual for the end of the day.
 

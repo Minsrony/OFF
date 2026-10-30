@@ -1,6 +1,6 @@
 /* OFF service worker: after the first visit the whole app (page, React, fonts) works offline.
    Supabase requests are never touched, so My Box data always goes to the network or the app's own queue. */
-const CACHE = 'off-shell-v1';
+const CACHE = 'off-shell-v2';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon.svg', './icon-192.png', './icon-512.png'];
 const CDN = [
   'https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js',
