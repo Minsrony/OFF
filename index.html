@@ -1761,6 +1761,142 @@ function Aurora({say}){
   return h(Stage,{setup});
 }
 
+/* ============ cloud: Supabase sync for My Box (offline-first) ============
+   The browser keeps working copy in localStorage. Every change is also queued and sent to
+   the off_box_items table under an anonymous Supabase session (no account, no sign-up).
+   Row-level security means a session can only ever see its own rows. If Supabase is
+   unreachable or anonymous sign-ins are off, the app simply keeps using local storage. */
+
+const SB_URL='https://jeerscukwmcawmoddoax.supabase.co';
+const SB_KEY='sb_publishable_JkOIq3bGF5fHrFLVFwfRNg_p19u-bcW';
+const SB_TABLE='off_box_items';
+
+const isUuid=s=>typeof s==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
+const newId=()=>{
+  try{ if(window.crypto&&crypto.randomUUID) return crypto.randomUUID(); }catch(e){}
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{const r=Math.random()*16|0; return (c==='x'?r:(r&3|8)).toString(16);});
+};
+const toRow=i=>({id:i.id,text:i.text,status:i.s,created_at:new Date(i.at||Date.now()).toISOString()});
+const fromRow=r=>({id:r.id,text:r.text,s:r.status,at:Date.parse(r.created_at)||Date.now()});
+
+const BoxSync=(function(){
+  let session=store.get('off.sb.session',null);
+  let queue=store.get('off.sb.queue',[]);
+  if(!Array.isArray(queue)) queue=[];
+  let busy=false, rev=0, state='idle', lastSync=0;
+  const subs=new Set();
+
+  function setState(s){ if(state!==s){ state=s; subs.forEach(f=>f(s)); } }
+  function httpErr(res,body){ const e=new Error('HTTP '+res.status+' '+String(body||'').slice(0,160)); e.status=res.status; return e; }
+  const saveQueue=()=>store.set('off.sb.queue',queue);
+  const done=ops=>{ queue=queue.filter(q=>ops.indexOf(q)<0); };   // by identity: the queue may have changed while a request was in flight
+  const stateFor=e=>(e&&e.status>=400&&e.status<500&&e.status!==408&&e.status!==429)?'unavailable':'offline';
+
+  function saveSession(j){
+    session={
+      access_token:j.access_token, refresh_token:j.refresh_token,
+      expires_at:j.expires_at||Math.floor(Date.now()/1000)+(j.expires_in||3600),
+      user_id:(j.user&&j.user.id)||(session&&session.user_id)||null
+    };
+    store.set('off.sb.session',session);
+  }
+  async function authCall(path,body){
+    const res=await fetch(SB_URL+path,{method:'POST',headers:{apikey:SB_KEY,'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const txt=await res.text();
+    if(!res.ok){ const e=httpErr(res,txt); e.auth=true; throw e; }
+    return JSON.parse(txt);
+  }
+  async function signIn(){
+    // Anonymous sign-in: same call supabase-js makes for signInAnonymously()
+    saveSession(await authCall('/auth/v1/signup',{data:{},gotrue_meta_security:{}}));
+  }
+  async function ensure(){
+    const now=Date.now()/1000;
+    if(session&&session.access_token&&session.expires_at-now>60) return;
+    if(session&&session.refresh_token){
+      try{ saveSession(await authCall('/auth/v1/token?grant_type=refresh_token',{refresh_token:session.refresh_token})); return; }
+      catch(e){ if(!(e.status>=400&&e.status<500)) throw e; /* refresh token rejected: start a fresh session */ }
+    }
+    session=null; store.set('off.sb.session',null);
+    await signIn();
+  }
+  async function rest(method,path,body,extra){
+    await ensure();
+    const h2=Object.assign({apikey:SB_KEY,Authorization:'Bearer '+session.access_token,'Content-Type':'application/json'},extra||{});
+    const res=await fetch(SB_URL+'/rest/v1/'+path,{method,headers:h2,body:body==null?undefined:JSON.stringify(body)});
+    const txt=await res.text();
+    if(res.status===401&&session){ session.expires_at=0; }      // force a refresh (not a new identity) on the next call
+    if(!res.ok) throw httpErr(res,txt);
+    return txt?JSON.parse(txt):null;
+  }
+
+  function push(op){
+    rev++;
+    if(op.t==='clear') queue=[];
+    else queue=queue.filter(q=>!(q.id===(op.t==='up'?op.row.id:op.id)));
+    queue.push(op.t==='up'?{t:'up',id:op.row.id,row:op.row}:op);
+    saveQueue();
+    flush();
+  }
+
+  async function flush(){
+    if(busy||!queue.length) return;
+    busy=true; let retry401=0;
+    try{
+      while(queue.length){
+        const op=queue[0];
+        try{
+          if(op.t==='up'){
+            const batch=[]; for(const q of queue){ if(q.t!=='up'||batch.length>=50) break; batch.push(q); }
+            await rest('POST',SB_TABLE+'?on_conflict=id',batch.map(q=>q.row),{Prefer:'resolution=merge-duplicates,return=minimal'});
+            done(batch);
+          } else if(op.t==='del'){
+            await rest('DELETE',SB_TABLE+'?id=eq.'+encodeURIComponent(op.id),null,{Prefer:'return=minimal'});
+            done([op]);
+          } else {
+            await rest('DELETE',SB_TABLE+'?user_id=eq.'+encodeURIComponent(session.user_id),null,{Prefer:'return=minimal'});
+            done([op]);
+          }
+        }catch(e){
+          if(e.status===401&&!e.auth&&++retry401<=2) continue;   // token went stale: ensure() renews it, retry the same op
+          const drop=!e.auth&&e.status>=400&&e.status<500&&e.status!==401&&e.status!==408&&e.status!==429;
+          if(drop){ done([op]); saveQueue(); continue; }       // a request the server will never accept must not block the rest
+          throw e;                                                // network, server or sign-in trouble: keep the queue, try later
+        }
+        retry401=0;
+        saveQueue();
+      }
+    }catch(e){ setState(stateFor(e)); }
+    finally{ saveQueue(); busy=false; }
+  }
+
+  /* Reconcile with the server. Returns the server's list, or null if nothing should change locally. */
+  async function sync(localItems){
+    if(!SB_URL||!SB_KEY) return null;
+    const startRev=rev;
+    try{
+      await ensure();
+      if(store.get('off.sb.owner',null)!==session.user_id){
+        // first run (or a brand-new session): copy whatever this browser already holds up to Supabase
+        const known={}; queue.forEach(q=>{ if(q.id) known[q.id]=1; });
+        (localItems||[]).forEach(i=>{ if(!known[i.id]) queue.push({t:'up',id:i.id,row:toRow(i)}); });
+        saveQueue(); store.set('off.sb.owner',session.user_id);
+      }
+      await flush();
+      if(queue.length||busy||rev!==startRev) return null;     // local changes still in flight: do not overwrite them
+      const rows=await rest('GET',SB_TABLE+'?select=id,text,status,created_at&order=created_at.desc&limit=1000');
+      if(rev!==startRev||queue.length) return null;
+      setState('online'); lastSync=Date.now();
+      return rows.map(fromRow);
+    }catch(e){
+      setState(stateFor(e));
+      return null;
+    }
+  }
+
+  return {push,sync,flush,get state(){return state;},get lastSync(){return lastSync;},sub(fn){subs.add(fn);return()=>subs.delete(fn);}};
+})();
+
 /* ============ screens: home, escape shell, put it down, my box, i'm done, about ============ */
 
 const svg=(p,kids)=>h('svg',Object.assign({width:20,height:20,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:1.8,strokeLinecap:'round',strokeLinejoin:'round','aria-hidden':'true'},p),...kids);
@@ -1772,15 +1908,45 @@ const Ico={
 };
 
 function useBox(){
-  const [items,setItems]=useState(()=>{const v=store.get('off.box.v1',[]); return Array.isArray(v)?v.filter(i=>i&&typeof i.text==='string'):[]});
+  const [items,setItems]=useState(()=>{
+    const v=store.get('off.box.v1',[]);
+    return Array.isArray(v)?v.filter(i=>i&&typeof i.text==='string').map(i=>isUuid(i.id)?i:Object.assign({},i,{id:newId()})):[];
+  });
+  const ref=useRef(items); ref.current=items;
+  const last=useRef(0);
   useEffect(()=>{store.set('off.box.v1',items)},[items]);
+  const refresh=useCallback(force=>{
+    if(!force&&Date.now()-last.current<15000) return;
+    last.current=Date.now();
+    BoxSync.sync(ref.current).then(r=>{ if(r) setItems(r); });
+  },[]);
+  useEffect(()=>{
+    refresh(true);
+    const vis=()=>{ if(document.visibilityState==='visible') refresh(false); };
+    const back=()=>refresh(true);
+    document.addEventListener('visibilitychange',vis); window.addEventListener('online',back);
+    return()=>{ document.removeEventListener('visibilitychange',vis); window.removeEventListener('online',back); };
+  },[]);
   return {
     items,
-    add:text=>setItems(a=>[{id:uid(),text,at:Date.now(),s:'open'}].concat(a)),
-    setS:(id,s)=>setItems(a=>a.map(i=>i.id===id?Object.assign({},i,{s}):i)),
-    purge:id=>setItems(a=>a.filter(i=>i.id!==id)),
-    clear:()=>setItems([])
+    add:text=>{
+      const it={id:newId(),text,at:Date.now(),s:'open'};
+      setItems(a=>[it].concat(a)); BoxSync.push({t:'up',row:toRow(it)});
+    },
+    setS:(id,s)=>{
+      const cur=ref.current.find(i=>i.id===id);
+      setItems(a=>a.map(i=>i.id===id?Object.assign({},i,{s}):i));
+      if(cur) BoxSync.push({t:'up',row:toRow(Object.assign({},cur,{s}))});
+    },
+    purge:id=>{ setItems(a=>a.filter(i=>i.id!==id)); BoxSync.push({t:'del',id}); },
+    clear:()=>{ setItems([]); BoxSync.push({t:'clear'}); }
   };
+}
+
+function useCloudState(){
+  const [st,setSt]=useState(BoxSync.state);
+  useEffect(()=>BoxSync.sub(setSt),[]);
+  return st;
 }
 
 function SoundBtn(){
@@ -1931,14 +2097,18 @@ function ImDone({box,go}){
 
 /* ---------- About (kept apart from the normal experience) ---------- */
 function About({box,onClose}){
-  const [sure,setSure]=useState(false);
+  const [sure,setSure]=useState(false), cs=useCloudState();
   useEffect(()=>{const k=e=>{if(e.key==='Escape') onClose()}; window.addEventListener('keydown',k); return()=>window.removeEventListener('keydown',k)},[]);
   return h('div',{className:'modal',onClick:onClose},
     h('div',{className:'sheet',role:'dialog','aria-modal':'true','aria-label':'About OFF',onClick:e=>e.stopPropagation()},
       h('h3',null,'About OFF'),
       h('p',null,'OFF is a relaxation and decompression tool. It is not medical care or therapy, it cannot diagnose or treat anything, and it is no substitute for professional help.'),
       h('p',null,'If you are struggling, please talk to a doctor, a qualified professional, or someone you trust.'),
-      h('p',null,'Everything you put down stays in this browser. Nothing is sent anywhere.'),
+      h('p',null,cs==='offline'
+        ?'You are offline for now. My Box is saved in this browser and will catch up when the connection is back.'
+        :cs==='unavailable'
+          ?'Online saving is not available right now, so My Box is kept in this browser only.'
+          :'My Box is saved privately online and tied to this browser. There is no account, and nobody else can open it.'),
       h('div',{className:'sheet-act'},
         sure
           ?[h('span',{key:'s',className:'sure'},'Empty My Box for good?'),h('button',{key:'y',className:'linkb sm',onClick:()=>{box.clear();setSure(false);}},'Yes, empty it'),h('button',{key:'n',className:'linkb sm',onClick:()=>setSure(false)},'Keep it')]
